@@ -6,9 +6,15 @@
 #include <imgui.h>
 #include <stb_image.h>
 #include "camera.h"
+#include "input.h"
 
 constexpr int MAX_FRAMES_IN_FLIGHT = 2;
-static const std::filesystem::path WorkDir = std::filesystem::current_path().parent_path().parent_path().parent_path();
+
+#ifndef GPU_GEMS_SOURCE_DIR
+#define GPU_GEMS_SOURCE_DIR "."
+#endif
+
+static const std::filesystem::path WorkDir = GPU_GEMS_SOURCE_DIR;
 static const std::filesystem::path AssetsDir = WorkDir / "assets/";
 static const std::filesystem::path ShadersDir = WorkDir / "shaders/";
 static const std::filesystem::path gltfModelsDir = AssetsDir / "glTF-Sample-Assets/Models/";
@@ -29,6 +35,12 @@ struct Buffer
 {
     VkBuffer buffer;
     VmaAllocation allocation;
+};
+
+struct Image
+{
+	VkImage image;
+	VmaAllocation allocation;
 };
 
 
@@ -62,7 +74,7 @@ void createDepthImageAndView(VulkanContext& context, VkImage& depthImage, VmaAll
 
     vk::ImageCreateInfo depthImageInfo{};
     depthImageInfo.setImageType(vk::ImageType::e2D)
-        .setFormat(vk::Format::eD32Sfloat)
+        .setFormat(depthFormat)
         .setExtent({ swapchain.getExtent().width, swapchain.getExtent().height, 1 })
         .setMipLevels(1)
         .setArrayLayers(1)
@@ -78,7 +90,7 @@ void createDepthImageAndView(VulkanContext& context, VkImage& depthImage, VmaAll
     auto depthImageViewCreateInfo = vk::ImageViewCreateInfo()
         .setImage(depthImage)
         .setViewType(vk::ImageViewType::e2D)
-        .setFormat(vk::Format::eD32Sfloat)
+        .setFormat(depthFormat)
         .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1));
     depthImageView = context.device.createImageView(depthImageViewCreateInfo);
 
@@ -152,13 +164,13 @@ static std::vector<char> readFile(const std::string &filename) {
      auto gltfFile = fastgltf::MappedGltfFile::FromPath(gltfFilePath);
      if (!bool(gltfFile)) {
          std::cerr << "Failed to open glTF file: " << fastgltf::getErrorMessage(gltfFile.error()) << '\n';
-         return false;
+         return EXIT_FAILURE;
      }
 
      auto asset = parser.loadGltf(gltfFile.get(), gltfFilePath.parent_path(), gltfOptions);
      if (asset.error() != fastgltf::Error::None) {
          std::cerr << "Failed to load glTF: " << fastgltf::getErrorMessage(asset.error()) << '\n';
-         return false;
+         return EXIT_FAILURE;
      }
 
      Swapchain swapchain(vulkanContext, window);
@@ -195,19 +207,22 @@ static std::vector<char> readFile(const std::string &filename) {
      }
 
      // image for depth texture (filled directly in GPU
-	 VmaAllocation depthImageAlloc{};
-	 VkImage depthImage{};
-     vk::raii::ImageView depthImageView{nullptr};
+     std::vector<VmaAllocation> depthImageAllocs(MAX_FRAMES_IN_FLIGHT);
+     std::vector<VkImage> depthImages(MAX_FRAMES_IN_FLIGHT);
+     std::vector<vk::raii::ImageView> depthImageViews;
+     depthImageViews.reserve(MAX_FRAMES_IN_FLIGHT);
 
 
      // load texture ( in CPU)
 	 int texWidth, texHeight, texChannels;
 	 stbi_uc* pixels = stbi_load((AssetsDir / "pattern.jpg").string().c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-	 vk::DeviceSize imageSize = texWidth * texHeight * 4;
      if (!pixels)
      {
 		 throw std::runtime_error("failed to load texture image!");
      }
+	 const vk::DeviceSize imageSize =
+         static_cast<vk::DeviceSize>(texWidth) *
+         static_cast<vk::DeviceSize>(texHeight) * 4;
 	 // create staging buffer for texture data(host visible)
 	 auto [texStagingBuffer, texStagingAlloc] = createBuffer(imageSize, vulkanContext.allocator, vk::BufferUsageFlagBits::eTransferSrc, VMA_MEMORY_USAGE_AUTO, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 	 // copy texture data to staging buffer
@@ -494,8 +509,10 @@ static std::vector<char> readFile(const std::string &filename) {
 
    std::vector<vk::raii::Semaphore> acquireSemaphores;
    std::vector<vk::raii::Semaphore> presentSemaphores;
-   for (size_t i = 0; i < swapchain.getImagesCount(); i++) {
+   for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
        acquireSemaphores.emplace_back(vulkanContext.device, vk::SemaphoreCreateInfo());
+   }
+   for (size_t i = 0; i < swapchain.getImagesCount(); i++) {
        presentSemaphores.emplace_back(vulkanContext.device, vk::SemaphoreCreateInfo());
    }
 
@@ -515,18 +532,65 @@ static std::vector<char> readFile(const std::string &filename) {
    auto commandBuffers = std::move(vk::raii::CommandBuffers(vulkanContext.device, commandBufferAllocateInfo));
    auto clearColorValue = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f);
    auto depthClear = vk::ClearDepthStencilValue(1.0f, 0);
-   createDepthImageAndView(vulkanContext, depthImage, depthImageAlloc, depthImageView, vk::Format::eD32Sfloat, swapchain);
+
+   for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+       vk::raii::ImageView view{nullptr};
+       createDepthImageAndView(vulkanContext, depthImages[i], depthImageAllocs[i],
+                               view, vk::Format::eD32Sfloat, swapchain);
+       depthImageViews.emplace_back(std::move(view));
+   }
+
+   auto recreateSwapchainResources = [&]() {
+       swapchain.recreate(window);
+       depthImageViews.clear();
+       for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+           vmaDestroyImage(vulkanContext.allocator, depthImages[i], depthImageAllocs[i]);
+           depthImages[i] = VK_NULL_HANDLE;
+           depthImageAllocs[i] = VK_NULL_HANDLE;
+           vk::raii::ImageView view{nullptr};
+           createDepthImageAndView(vulkanContext, depthImages[i], depthImageAllocs[i],
+                                   view, vk::Format::eD32Sfloat, swapchain);
+           depthImageViews.emplace_back(std::move(view));
+       }
+       presentSemaphores.clear();
+       for (size_t i = 0; i < swapchain.getImagesCount(); ++i) {
+           presentSemaphores.emplace_back(vulkanContext.device, vk::SemaphoreCreateInfo());
+       }
+   };
 
    vk::RenderingAttachmentInfo renderingAttachmentInfo{};
    vk::RenderingInfo renderingInfo{};
 
    size_t currentFrame = 0;
-
    UniformBufferObject cameraUbo{};
 
+   auto& inputState = window.getInputState();
+
    while (!window.shouldClose()) {
+
+	   inputState.beginFrame();
        glfwPollEvents();
-    
+	   inputState.processEvents();
+
+       if (inputState.wasPressed(GLFW_KEY_W))
+       {
+		   std::cout << "W pressed" << std::endl;
+       }
+       if (inputState.wasReleased(GLFW_KEY_W))
+       {
+		   std::cout << "W released" << std::endl;
+       };
+
+       if (inputState.isHeld(GLFW_KEY_W))
+       {
+           std::cout << "W held" << std::endl;
+       };
+
+       if (inputState.wasMouseButtonPressed(GLFW_MOUSE_BUTTON_1))
+       {
+		   std::cout << inputState.getMousePosition().x << " " << inputState.getMousePosition().y << std::endl;
+       }
+
        auto fenceResult = vulkanContext.device.waitForFences(*drawFences[currentFrame], VK_TRUE, UINT64_MAX);
         if (fenceResult != vk::Result::eSuccess) {
         throw std::runtime_error("Failed to wait for fence");
@@ -534,16 +598,15 @@ static std::vector<char> readFile(const std::string &filename) {
         vk::Result result{};
         uint32_t imageIndex{};
 
+        bool shouldRecreateSwapchain = false;
         try {
              std::tie(result, imageIndex) = vulkanContext.device.acquireNextImage2KHR(
             vk::AcquireNextImageInfoKHR(swapchain.get(), UINT64_MAX, *acquireSemaphores[currentFrame], nullptr, 1));
-             
+             shouldRecreateSwapchain = result == vk::Result::eSuboptimalKHR;
         }
         catch (const vk::OutOfDateKHRError)
         {
-            swapchain.recreate(window);
-            vmaDestroyImage(vulkanContext.allocator, depthImage, depthImageAlloc);
-			createDepthImageAndView(vulkanContext, depthImage, depthImageAlloc, depthImageView, vk::Format::eD32Sfloat, swapchain);
+            recreateSwapchainResources();
             continue;
         }
         
@@ -555,7 +618,7 @@ static std::vector<char> readFile(const std::string &filename) {
 
 
        auto depthAttachmentInfo = vk::RenderingAttachmentInfo()
-           .setImageView(*depthImageView)
+           .setImageView(*depthImageViews[currentFrame])
            .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
            .setLoadOp(vk::AttachmentLoadOp::eClear)
            .setStoreOp(vk::AttachmentStoreOp::eDontCare)
@@ -567,8 +630,7 @@ static std::vector<char> readFile(const std::string &filename) {
            .setStoreOp(vk::AttachmentStoreOp::eStore)
            .setClearValue(clearColorValue);
 
-       renderingInfo
-           .setRenderArea({ {0,0}, swapchain.getExtent() })
+       renderingInfo.setRenderArea({ {0,0}, swapchain.getExtent() })
            .setLayerCount(1)
            .setColorAttachments(renderingAttachmentInfo)
 		   .setPDepthAttachment(&depthAttachmentInfo);
@@ -605,7 +667,7 @@ static std::vector<char> readFile(const std::string &filename) {
 		   .setDstAccessMask(vk::AccessFlagBits2::eDepthStencilAttachmentWrite)
 		   .setOldLayout(vk::ImageLayout::eUndefined)
 		   .setNewLayout(vk::ImageLayout::eDepthAttachmentOptimal)
-		   .setImage(depthImage)
+		   .setImage(depthImages[currentFrame])
 		   .setSubresourceRange({ vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1 });
 
        vk::DependencyInfo depInfoToColor{};
@@ -652,16 +714,16 @@ static std::vector<char> readFile(const std::string &filename) {
 	   presentInfo.pWaitSemaphores = &(*presentSemaphores[imageIndex]);
 
        try {
-           auto presentResult = vulkanContext.graphicsQueue.presentKHR(presentInfo);
-
+           auto presentResult = vulkanContext.presentQueue.presentKHR(presentInfo);
+           shouldRecreateSwapchain =
+               shouldRecreateSwapchain || presentResult == vk::Result::eSuboptimalKHR;
        }
        catch (const vk::OutOfDateKHRError) {
-		   swapchain.recreate(window);
-           vmaDestroyImage(vulkanContext.allocator, depthImage, depthImageAlloc);
-           createDepthImageAndView(vulkanContext, depthImage, depthImageAlloc, depthImageView, vk::Format::eD32Sfloat, swapchain);
-           continue;
-        
+           shouldRecreateSwapchain = true;
        }
+        if (shouldRecreateSwapchain) {
+            recreateSwapchainResources();
+        }
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
     }
@@ -670,8 +732,12 @@ static std::vector<char> readFile(const std::string &filename) {
     vmaDestroyBuffer(vulkanContext.allocator, stagingBuffer, stagingAlloc);
     vmaDestroyBuffer(vulkanContext.allocator, vertexBuffer, vertexAlloc);
     vmaDestroyBuffer(vulkanContext.allocator, indexBuffer, indexAlloc);
-    vmaDestroyImage(vulkanContext.allocator, depthImage, depthImageAlloc);
+    depthImageViews.clear();
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vmaDestroyImage(vulkanContext.allocator, depthImages[i], depthImageAllocs[i]);
+    }
 	vmaDestroyBuffer(vulkanContext.allocator, texStagingBuffer, texStagingAlloc);
+    textureImageView = nullptr;
 	vmaDestroyImage(vulkanContext.allocator, textureImage, imageAlloc);
 	for (const auto& [buffer, allocation] : uboUniformBuffers) {
 		vmaDestroyBuffer(vulkanContext.allocator, buffer, allocation);

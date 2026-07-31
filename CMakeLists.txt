@@ -3,6 +3,13 @@ project(gpuGems LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(GPU_GEMS_ENABLE_ASAN "Build all project targets with AddressSanitizer" OFF)
+
+if (MSVC AND GPU_GEMS_ENABLE_ASAN)
+  add_compile_options(/fsanitize=address)
+endif()
+
 find_package(Vulkan REQUIRED)
 add_subdirectory(external/glfw)
 add_subdirectory(external/glm)
@@ -12,8 +19,8 @@ add_subdirectory(external/fastgltf)
 add_subdirectory(external/fmt)
 add_subdirectory(external/tracy)
 add_subdirectory(external/vk-bootstrap)
+
 add_executable(gpuGems src/main.cpp src/stb_impl.cpp src/vma_impl.cpp src/window.cpp "src/vulkanContext.cpp" "src/swapchain.cpp" "src/camera.cpp" )
-add_compile_options(/fsanitize=address)
 #imgui
 add_library(imgui
         external/imgui/imgui.cpp
@@ -67,6 +74,8 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 
 target_link_libraries(gpuGems PRIVATE Vulkan::Vulkan imgui GPUOpen::VulkanMemoryAllocator glfw glm spdlog::spdlog fastgltf fmt Tracy::TracyClient vk-bootstrap )
 target_include_directories(gpuGems PRIVATE external/stb src )
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}" GPU_GEMS_SOURCE_DIR)
+target_compile_definitions(gpuGems PRIVATE GPU_GEMS_SOURCE_DIR="${GPU_GEMS_SOURCE_DIR}")
 
 file (GLOB SHADER_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.slang)
 

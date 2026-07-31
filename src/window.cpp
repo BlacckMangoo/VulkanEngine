@@ -1,29 +1,29 @@
 #include "window.h"
 
-void Window::setInputCallbacks() {
-	glfwSetScrollCallback(window, scrollCallback);
-    glfwSetWindowUserPointer(window, this);
-    glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
-}
-
 Window::Window(int width, int height, const std::string &title)
-    : width(width), height(height), title(title) {
+    : width(width), height(height), title(title){
   if (!glfwInit()) {
-    std::cerr << "Failed to initialize !" << std::endl;
+    throw std::runtime_error("Failed to initialize GLFW");
   }
   if (!glfwVulkanSupported()) {
     glfwTerminate();
-    std::cerr << "Vulkan support not available!" << std::endl;
+    throw std::runtime_error("Vulkan support not available");
   }
-  glfwWindowHint(GLFW_CLIENT_API,
-                 GLFW_NO_API); // by default open gl window ,need vulkan
+  glfwWindowHint(GLFW_CLIENT_API,GLFW_NO_API); // by default open gl window ,need vulkan
 
   window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
   if (!window) {
-    std::cerr << "Failed to create GLFW window!" << std::endl;
+    glfwTerminate();
+    throw std::runtime_error("Failed to create GLFW window");
   }
- 
-  setInputCallbacks();
+
+  inputAdapter = std::make_unique<GlfwInputAdapter>(window, inputState);
+
+  // set input call backs 
+
+  glfwSetKeyCallback(window, keyCallback);
+  glfwSetCursorPosCallback(window, mouseMoveCallback);
+  glfwSetMouseButtonCallback(window, mouseButtonCallback);
 }
 
 vk::raii::SurfaceKHR Window::createSurface(const vk::raii::Instance &instance,

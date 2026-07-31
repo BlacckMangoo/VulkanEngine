@@ -19,32 +19,66 @@ void VulkanContext::init(Window& window) {
     instance = vk::raii::Instance{ context, vkbInstance.instance };
     debugMessenger = vk::raii::DebugUtilsMessengerEXT{ instance, vkbInstance.debug_messenger};
 
-    auto devices = vk::raii::PhysicalDevices(instance);
-    for (const auto& device : devices) {
-        if (device.getProperties().deviceType ==vk::PhysicalDeviceType::eDiscreteGpu) {
-            physicalDevice = device;
-            break;
-        }
-    };
-    
-
     surface = window.createSurface(instance, context);
-    std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
-    for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size();qfpIndex++)
-    {
-        const bool supportsGraphics = static_cast<bool>(queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics);
-        const bool supportsPresent = physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface) == VK_TRUE;
 
-        if (supportsGraphics && graphicsQueueIndex == ~0u) graphicsQueueIndex = qfpIndex;
-        if (supportsPresent && presentQueueIndex == ~0u) presentQueueIndex = qfpIndex;
+    auto devices = vk::raii::PhysicalDevices(instance);
+    auto selectDevice = [&](bool discreteOnly) {
+        for (const auto& candidate : devices) {
+            if (discreteOnly &&
+                candidate.getProperties().deviceType != vk::PhysicalDeviceType::eDiscreteGpu) {
+                continue;
+            }
 
-        // early out once both are found
-        if (graphicsQueueIndex != ~0u && presentQueueIndex != ~0u)
-            break;
-    }
+            bool hasSwapchain = false;
+            for (const auto& extension : candidate.enumerateDeviceExtensionProperties()) {
+                if (std::string_view(extension.extensionName) == vk::KHRSwapchainExtensionName) {
+                    hasSwapchain = true;
+                    break;
+                }
+            }
+            if (!hasSwapchain) {
+                continue;
+            }
 
-    if (graphicsQueueIndex == ~0u || presentQueueIndex == ~0u) {
-        throw std::runtime_error("Could not find suitable graphics/present queue families -> terminating");
+            auto supportedFeatures =
+                candidate.getFeatures2<vk::PhysicalDeviceFeatures2,
+                                       vk::PhysicalDeviceVulkan13Features>();
+            const auto& coreFeatures = supportedFeatures.get<vk::PhysicalDeviceFeatures2>().features;
+            const auto& vulkan13Features = supportedFeatures.get<vk::PhysicalDeviceVulkan13Features>();
+            if (!coreFeatures.samplerAnisotropy ||
+                !vulkan13Features.dynamicRendering ||
+                !vulkan13Features.synchronization2) {
+                continue;
+            }
+
+            uint32_t graphics = ~0u;
+            uint32_t present = ~0u;
+            const auto queueFamilies = candidate.getQueueFamilyProperties();
+            for (uint32_t index = 0; index < queueFamilies.size(); ++index) {
+                if (graphics == ~0u &&
+                    static_cast<bool>(queueFamilies[index].queueFlags &
+                                      vk::QueueFlagBits::eGraphics)) {
+                    graphics = index;
+                }
+                if (present == ~0u && candidate.getSurfaceSupportKHR(index, *surface)) {
+                    present = index;
+                }
+            }
+
+            if (graphics != ~0u && present != ~0u) {
+                physicalDevice = candidate;
+                graphicsQueueIndex = graphics;
+                presentQueueIndex = present;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (!selectDevice(true) && !selectDevice(false)) {
+        throw std::runtime_error(
+            "Could not find a Vulkan device with swapchain, graphics, presentation, "
+            "dynamic rendering, synchronization2, and sampler anisotropy support");
     }
 
 
@@ -55,22 +89,11 @@ void VulkanContext::init(Window& window) {
         deviceQueueCreateInfos.emplace_back(vk::DeviceQueueCreateFlags(), queueFamily, 1, &queuePriority);
     }
 
-    vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
-        vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
-        vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
+    vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features>
         featureChain;
     featureChain.get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy = VK_TRUE;
-    featureChain.get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters = VK_TRUE;
     featureChain.get<vk::PhysicalDeviceVulkan13Features>().synchronization2 = VK_TRUE;
-
-    featureChain.get<vk::PhysicalDeviceVulkan12Features>().descriptorIndexing = VK_TRUE;
-    featureChain.get<vk::PhysicalDeviceVulkan12Features>().shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
-    featureChain.get<vk::PhysicalDeviceVulkan12Features>().descriptorBindingVariableDescriptorCount = VK_TRUE;
-    featureChain.get<vk::PhysicalDeviceVulkan12Features>().runtimeDescriptorArray = VK_TRUE;
-    featureChain.get<vk::PhysicalDeviceVulkan12Features>().bufferDeviceAddress = VK_TRUE;
     featureChain.get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering = VK_TRUE;
-
-    featureChain.get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState = VK_TRUE;
 
     std::vector<const char*> requiredDeviceExtension = { vk::KHRSwapchainExtensionName };
     vk::DeviceCreateInfo deviceCreateInfo{};

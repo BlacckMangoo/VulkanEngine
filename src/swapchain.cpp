@@ -32,10 +32,21 @@ void Swapchain::create(Window& window)
 {
     vk::SurfaceCapabilitiesKHR surfaceCapabilities = vulkanContext.physicalDevice.getSurfaceCapabilitiesKHR(*vulkanContext.surface);
 
-    swapchainExtent = surfaceCapabilities.currentExtent; // will need later too
-    if (!swapchainExtent.width || !swapchainExtent.height) {
-        swapchainExtent.width = std::clamp(window.getWidth(), surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width);
-        swapchainExtent.height = std::clamp(window.getHeight(), surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height);
+    if (surfaceCapabilities.currentExtent.width !=
+        std::numeric_limits<uint32_t>::max()) {
+        swapchainExtent = surfaceCapabilities.currentExtent;
+    } else {
+        int framebufferWidth = 0;
+        int framebufferHeight = 0;
+        glfwGetFramebufferSize(window.getGLFWWindow(), &framebufferWidth, &framebufferHeight);
+        swapchainExtent.width = std::clamp(
+            static_cast<uint32_t>(framebufferWidth),
+            surfaceCapabilities.minImageExtent.width,
+            surfaceCapabilities.maxImageExtent.width);
+        swapchainExtent.height = std::clamp(
+            static_cast<uint32_t>(framebufferHeight),
+            surfaceCapabilities.minImageExtent.height,
+            surfaceCapabilities.maxImageExtent.height);
     }
 
     uint32_t imageCount = surfaceCapabilities.minImageCount + 1;
@@ -44,6 +55,9 @@ void Swapchain::create(Window& window)
     }
 
     auto formats = vulkanContext.physicalDevice.getSurfaceFormatsKHR(*vulkanContext.surface);
+    if (formats.empty()) {
+        throw std::runtime_error("Surface exposes no swapchain formats");
+    }
     swapchainImageFormat = formats[0].format;
     swapchainColorSpace = formats[0].colorSpace;
 
@@ -54,12 +68,21 @@ void Swapchain::create(Window& window)
         .setImageExtent(swapchainExtent)
         .setImageArrayLayers(1)
         .setImageUsage(vk::ImageUsageFlagBits::eColorAttachment)
-        .setImageSharingMode(vk::SharingMode::eExclusive)
         .setPreTransform(surfaceCapabilities.currentTransform)
         .setCompositeAlpha(vk::CompositeAlphaFlagBitsKHR::eOpaque)
         .setPresentMode(vk::PresentModeKHR::eFifo)
         .setClipped(VK_TRUE)
         .setImageColorSpace(swapchainColorSpace);
+
+    const std::array queueFamilyIndices{
+        vulkanContext.graphicsQueueIndex, vulkanContext.presentQueueIndex};
+    if (vulkanContext.graphicsQueueIndex != vulkanContext.presentQueueIndex) {
+        swapchainCreateInfo
+            .setImageSharingMode(vk::SharingMode::eConcurrent)
+            .setQueueFamilyIndices(queueFamilyIndices);
+    } else {
+        swapchainCreateInfo.setImageSharingMode(vk::SharingMode::eExclusive);
+    }
 
     swapchain = vulkanContext.device.createSwapchainKHR(swapchainCreateInfo);
     swapchainImages = swapchain.getImages();

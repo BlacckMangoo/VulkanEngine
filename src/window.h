@@ -1,7 +1,10 @@
 #pragma once 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <memory>
 #include "common.h"
+#include "input.h"
+
 
 class Window {
 
@@ -11,26 +14,16 @@ public:
   GLFWwindow *getGLFWWindow() const { return window; }
   uint32_t getWidth() const { return width; }
   uint32_t getHeight() const { return height; }
-  auto getTitle() const { return title; };
+  const std::string& getTitle() const { return title; }
   vk::raii::SurfaceKHR createSurface(const vk::raii::Instance &instance,const vk::raii::Context &context) const;
   bool shouldClose() const { return glfwWindowShouldClose(window); }
-
-  bool framebufferResized = false;
+  InputState& getInputState() { return inputState; }
+  const InputState& getInputState() const { return inputState; }
 private:
-  void setInputCallbacks();
   GLFWwindow *window;
   uint32_t width;
   uint32_t height;
-  VkSurfaceKHR surface; 
-  const std::string& title;
+  std::string title;
+  InputState inputState;
+  std::unique_ptr<GlfwInputAdapter> inputAdapter;
 };
-
-static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
-    auto* self = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
-    self->framebufferResized = true;
-	std::cout << "Framebuffer resized: width=" << width << ", height=" << height << std::endl;
-}
-
-static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
-	std::cout << "Scroll offset: x=" << xoffset << ", y=" << yoffset << std::endl;
-}
